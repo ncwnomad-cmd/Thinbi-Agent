@@ -107,6 +107,36 @@ app.post("/agent/draft", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+app.post("/content/create", async (req, res, next) => {
+  try {
+    const topic = String(req.body?.topic || "").trim().slice(0, 1000);
+    if (!topic) return res.status(400).json({ error: "Provide a content topic or idea." });
+    const platform = String(req.body?.platform || "Instagram Reels").slice(0, 80);
+    const format = String(req.body?.format || "short-form video").slice(0, 80);
+    const goal = String(req.body?.goal || "engagement and meaningful comments").slice(0, 160);
+    const callToAction = String(req.body?.cta || "Ask viewers to comment with their experience").slice(0, 200);
+    const extra = String(req.body?.instructions || "").slice(0, 1200);
+    const instructions = [
+      "You are the content creator for Kai Sharma and @ismyguthappy.",
+      "Audience: men 40+, with emphasis on strength, muscle, mobility, energy habits, nutrition, and healthy aging.",
+      "Create useful, original, conversational social content. Avoid clickbait that misleads.",
+      "Do not invent studies, statistics, medical facts, product ingredients, dosages, or guaranteed outcomes.",
+      "Do not diagnose, treat, or promise health outcomes. Phrase health information cautiously and recommend qualified care for individual medical concerns.",
+      "Do not force product promotion. Mention creatine gummies only when relevant to the topic or explicitly requested, and never invent product claims.",
+      "Return a polished, ready-to-edit draft with clear headings: CONCEPT, 3 HOOK OPTIONS, SCRIPT / SLIDE COPY, ON-SCREEN TEXT, CAPTION, CTA, HASHTAGS, and OPTIONAL PINNED COMMENT.",
+      "Keep the opening hook strong, the language natural, and the CTA specific. For video, include a concise shot/visual cue where useful.",
+      "The user must review content before publishing. Do not claim anything was posted."
+    ].join(" ");
+    const response = await getOpenAI().responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-5.5",
+      instructions,
+      input: "Create content using these requirements:\nPlatform: " + platform + "\nFormat: " + format + "\nGoal: " + goal + "\nTopic: " + topic + "\nCTA: " + callToAction + "\nAdditional instructions: " + extra,
+      max_output_tokens: 1200,
+      store: false
+    });
+    res.json({ ok: true, content: response.output_text || "", published: false, model: response.model });
+  } catch (e) { next(e); }
+});
 app.get("/composio/connect", async (_req, res, next) => {
   try {
     const active = await getInstagramConnection();
@@ -171,3 +201,4 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => console.log(`Thinbi Instagram agent listening on port ${PORT}`));
+
