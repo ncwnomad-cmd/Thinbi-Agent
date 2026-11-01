@@ -34,20 +34,29 @@ function verifyMetaSignature(req) {
   return actual.length === expected.length && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
-async function sendInstagramMessage(recipient, text) {
+async function metaPost(path, body) {
   const token = process.env.META_ACCESS_TOKEN;
-  const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
   const version = process.env.META_GRAPH_API_VERSION;
-  if (!token || !accountId || !version) throw new Error("Instagram messaging credentials are not fully configured.");
-  const response = await fetch(`https://graph.facebook.com/${version}/${accountId}/messages`, {
+  if (!token || !version) throw new Error("Instagram messaging credentials are not fully configured.");
+  const response = await fetch(`https://graph.facebook.com/${version}/${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ recipient, message: { text }, access_token: token }),
+    body: JSON.stringify({ ...body, access_token: token }),
     signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
-  if (!response.ok) throw new Error("Instagram send failed (" + response.status + "): " + JSON.stringify(data).slice(0, 500));
+  if (!response.ok) throw new Error("Instagram API send failed (" + response.status + "): " + JSON.stringify(data).slice(0, 500));
   return data;
+}
+
+async function sendInstagramMessage(recipient, text) {
+  const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+  if (!accountId) throw new Error("INSTAGRAM_ACCOUNT_ID is not configured.");
+  return metaPost(accountId + "/messages", { recipient, message: { text } });
+}
+
+async function sendPublicCommentReply(commentId, text) {
+  return metaPost(commentId + "/replies", { message: text });
 }
 
 async function receiveComment(comment) {
@@ -76,7 +85,11 @@ async function receiveComment(comment) {
     item.draft = result.output_text || item.draft;
     if (AUTO_DMS_ENABLED) {
       await sendInstagramMessage({ comment_id: id }, item.draft);
-      item.status = "sent";
+      item.status = "dm_sent";
+      // Publicly acknowledge only after Meta confirms the private reply was sent.
+      await sendPublicCommentReply(id, "Thanks for commenting! Just sent you a DM. 😊");
+      item.status = "dm_and_comment_reply_sent";
+      item.publicReply = "Thanks for commenting! Just sent you a DM. 😊";
     }
   } catch (error) {
     item.status = AUTO_DMS_ENABLED ? "send_failed" : "draft_ready";
