@@ -98,6 +98,19 @@ app.post("/agent/draft", async (req, res, next) => {
     const message = String(req.body?.message || "").trim().slice(0, 4000);
     if (!message) return res.status(400).json({ error: "Provide a non-empty message." });
 
+    // Deterministic offer-link routing for direct requests. This avoids relying on
+    // a small local model to reproduce exact URLs from its knowledge prompt.
+    const asksForGuide = /\\b(guide|roadmap|57[- ]?29|free plan|free routine)\\b/i.test(message)
+      && /\\b(send|share|link|where|give|get|download|please|can i have|could i have)\\b/i.test(message);
+    if (asksForGuide) {
+      return res.json({
+        ok: true,
+        draft: "Absolutely! Here's the free 57-29 Roadmap: https://40roadmap.netlify.app",
+        sent: false,
+        model: "offer-link-rule"
+      });
+    }
+
     const history = Array.isArray(req.body?.history)
       ? req.body.history.slice(-12).map((item) => ({
           role: item?.role === "assistant" ? "assistant" : "user",
