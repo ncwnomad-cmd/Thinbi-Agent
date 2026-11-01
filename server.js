@@ -22,6 +22,31 @@ let session;
 // On Render, DATA_DIR must point to a mounted persistent disk to survive deploys.
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const STATE_FILE = join(DATA_DIR, "instagram-agent-state.json");
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const USE_SUPABASE_STATE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const SUPABASE_STATE_ID = "instagram-agent-state";
+
+async function supabaseStateRequest(method, body) {
+  const response = await fetch(SUPABASE_URL + "/rest/v1/agent_state" +
+    (method === "GET" ? "?id=eq." + encodeURIComponent(SUPABASE_STATE_ID) + "&select=state" : ""),
+    {
+      method,
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        authorization: "Bearer " + SUPABASE_SERVICE_ROLE_KEY,
+        "content-type": "application/json",
+        ...(method === "POST" ? { Prefer: "resolution=merge-duplicates,return=minimal" } : {})
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(15000)
+    });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error("Supabase state " + method + " failed (" + response.status + "): " + detail.slice(0, 400));
+  }
+  return method === "GET" ? response.json() : null;
+}
 const pendingComments = new Map();
 const processedFollowerIds = new Set();
 const processedMessageIds = new Set();
@@ -32,33 +57,50 @@ const inFlightMessages = new Set();
 const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
 let saveQueue = Promise.resolve();
 
+function serializePersistentState() {
+  return {
+    processedFollowerIds: [...processedFollowerIds],
+    processedMessageIds: [...processedMessageIds],
+    followerReservations: [...followerReservations.entries()],
+    pendingComments: [...pendingComments.entries()],
+    dmHistory: [...dmHistory.entries()]
+  };
+}
+
+function applyPersistentState(state = {}) {
+  for (const id of state.processedFollowerIds || []) processedFollowerIds.add(id);
+  for (const id of state.processedMessageIds || []) processedMessageIds.add(id);
+  for (const [id, item] of state.followerReservations || []) followerReservations.set(id, item);
+  for (const [id, item] of state.pendingComments || []) pendingComments.set(id, item);
+  for (const [id, items] of state.dmHistory || []) dmHistory.set(id, items);
+}
+
 async function loadPersistentState() {
+  if (USE_SUPABASE_STATE) {
+    const rows = await supabaseStateRequest("GET");
+    if (rows[0]?.state) applyPersistentState(rows[0].state);
+    console.log("Persistent state loaded from Supabase.");
+    return;
+  }
   await mkdir(dirname(STATE_FILE), { recursive: true });
   try {
     const raw = await readFile(STATE_FILE, "utf8");
-    const state = JSON.parse(raw);
-    for (const id of state.processedFollowerIds || []) processedFollowerIds.add(id);
-    for (const id of state.processedMessageIds || []) processedMessageIds.add(id);
-    for (const [id, item] of state.followerReservations || []) followerReservations.set(id, item);
-    for (const [id, item] of state.pendingComments || []) pendingComments.set(id, item);
-    for (const [id, items] of state.dmHistory || []) dmHistory.set(id, items);
+    applyPersistentState(JSON.parse(raw));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
 }
 
 function persistState() {
-  const state = JSON.stringify({
-    processedFollowerIds: [...processedFollowerIds],
-    processedMessageIds: [...processedMessageIds],
-    followerReservations: [...followerReservations.entries()],
-    pendingComments: [...pendingComments.entries()],
-    dmHistory: [...dmHistory.entries()]
-  });
+  const state = serializePersistentState();
   saveQueue = saveQueue.then(async () => {
+    if (USE_SUPABASE_STATE) {
+      await supabaseStateRequest("POST", [{ id: SUPABASE_STATE_ID, state, updated_at: new Date().toISOString() }]);
+      return;
+    }
     await mkdir(dirname(STATE_FILE), { recursive: true });
     const temp = STATE_FILE + ".tmp";
-    await writeFile(temp, state, "utf8");
+    await writeFile(temp, JSON.stringify(state), "utf8");
     await rename(temp, STATE_FILE);
   });
   return saveQueue;
@@ -302,7 +344,8 @@ app.get("/health", (_req, res) => res.json({
   automatedRepliesEnabled: AUTO_DMS_ENABLED,
   commentRepliesPerComment: 1,
   dmSalesConversationEnabled: AUTO_DMS_ENABLED,
-  stateStorage: "file",
+  stateStorage: USE_SUPABASE_STATE ? "supabase" : "file",
+  supabaseConfigured: USE_SUPABASE_STATE,
   dataDirConfigured: Boolean(process.env.DATA_DIR)
 }));
 

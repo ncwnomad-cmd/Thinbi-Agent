@@ -33,3 +33,7 @@ services:
         value: qwen2.5:1.5b
       - key: DATA_DIR
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
