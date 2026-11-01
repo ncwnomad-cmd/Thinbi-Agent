@@ -77,9 +77,18 @@ function applyPersistentState(state = {}) {
 
 async function loadPersistentState() {
   if (USE_SUPABASE_STATE) {
-    const rows = await supabaseStateRequest("GET");
-    if (rows[0]?.state) applyPersistentState(rows[0].state);
-    console.log("Persistent state loaded from Supabase.");
+    let rows = await supabaseStateRequest("GET");
+    if (!rows[0]?.state) {
+      await supabaseStateRequest("POST", [{
+        id: SUPABASE_STATE_ID,
+        state: serializePersistentState(),
+        updated_at: new Date().toISOString()
+      }]);
+      rows = await supabaseStateRequest("GET");
+      if (!rows[0]?.state) throw new Error("Supabase state write/read verification failed.");
+    }
+    applyPersistentState(rows[0].state);
+    console.log("Persistent state loaded and verified in Supabase.");
     return;
   }
   await mkdir(dirname(STATE_FILE), { recursive: true });
