@@ -6,30 +6,54 @@
 <style>
 :root{color-scheme:dark;--bg:#101714;--panel:#19231e;--line:#304238;--muted:#a9b8ae;--accent:#b8e3c5;--ink:#f2f7f3}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,Arial,sans-serif}
-main{max-width:850px;margin:0 auto;min-height:100vh;padding:28px 18px;display:flex;flex-direction:column}
-header{padding:12px 4px 22px;border-bottom:1px solid var(--line)}h1{font-size:23px;margin:0 0 4px}header p,.hint{color:var(--muted);margin:0}
+main{max-width:900px;margin:0 auto;min-height:100vh;padding:28px 18px;display:flex;flex-direction:column}
+header{padding:12px 4px 20px;border-bottom:1px solid var(--line)}h1{font-size:24px;margin:0 0 4px}header p,.hint{color:var(--muted);margin:0}
 #status{font-size:12px;color:var(--accent);margin-top:9px}
-#chat{flex:1;min-height:360px;padding:22px 0;display:flex;flex-direction:column;gap:14px}
-.msg{max-width:88%;padding:13px 15px;border-radius:15px;white-space:pre-wrap;overflow-wrap:anywhere}
+nav{display:flex;gap:8px;padding:18px 0 4px;flex-wrap:wrap}
+.tab{background:transparent;color:var(--muted);border:1px solid var(--line)}.tab.active{background:var(--accent);color:#102017;border-color:var(--accent)}
+.panel{display:none}.panel.active{display:block}
+.chat{min-height:300px;padding:18px 0;display:flex;flex-direction:column;gap:14px}
+.msg{max-width:90%;padding:13px 15px;border-radius:15px;white-space:pre-wrap;overflow-wrap:anywhere}
 .user{align-self:flex-end;background:#294536}.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--line)}
 .label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
-form{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:12px}
-textarea{display:block;width:100%;resize:vertical;min-height:85px;background:transparent;color:var(--ink);border:0;outline:0;font:inherit}
-.actions{display:flex;justify-content:space-between;align-items:center;gap:12px;padding-top:8px}
+form{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:14px;margin:12px 0 18px}
+textarea,input,select{display:block;width:100%;background:#111a15;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:11px;font:inherit;margin:6px 0 13px}
+textarea{resize:vertical;min-height:90px}
+label{display:block;color:var(--muted);font-size:13px;margin-top:8px}
+.actions{display:flex;justify-content:space-between;align-items:center;gap:12px;padding-top:8px;flex-wrap:wrap}
 button{background:var(--accent);color:#102017;border:0;border-radius:999px;padding:10px 18px;font-weight:700;cursor:pointer}
 button:disabled{opacity:.5;cursor:wait}.small{background:transparent;color:var(--accent);border:1px solid var(--line);padding:6px 12px;font-size:12px}
+.output{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;white-space:pre-wrap;overflow-wrap:anywhere;min-height:60px;margin-bottom:14px}
 footer{font-size:12px;color:var(--muted);padding:12px 3px}
 </style></head>
 <body><main>
-<header><h1>Kai's Instagram Assistant</h1><p>Draft replies for @ismyguthappy. Review and copy before sending.</p><div id="status">Checking agent connection…</div></header>
-<section id="chat" aria-live="polite"><div class="msg assistant"><div class="label">Assistant</div>Hi! Paste a follower's message below and I'll draft a natural reply. Nothing is sent automatically.</div></section>
-<form id="form"><textarea id="message" maxlength="4000" placeholder="Paste the follower's message here…" required></textarea><div class="actions"><span class="hint" id="note">Draft only · Not connected to automatic sending</span><button id="send" type="submit">Draft reply</button></div></form>
-<footer>Check health and product claims before sending. Affiliate links must include the required disclosure.</footer>
+<header><h1>Kai's Instagram Assistant</h1><p>Sales conversations and content creation for @ismyguthappy.</p><div id="status">Checking agent connection…</div></header>
+<nav><button class="tab active" data-tab="sales">Sales Agent</button><button class="tab" data-tab="content">Content Agent</button></nav>
+<section id="sales" class="panel active">
+<div class="chat" id="chat" aria-live="polite"><div class="msg assistant"><div class="label">Sales Agent</div>Paste a follower's message and I'll draft a natural reply. Nothing is sent automatically.</div></div>
+<form id="salesForm"><label for="message">Follower's message</label><textarea id="message" maxlength="4000" placeholder="Paste the follower's DM here…" required></textarea><div class="actions"><span class="hint">Draft only · Not connected to automatic sending</span><button id="send" type="submit">Draft reply</button></div></form>
+</section>
+<section id="content" class="panel">
+<form id="contentForm">
+<label for="topic">What should Kai create content about?</label><textarea id="topic" maxlength="1000" placeholder="Example: 5 simple habits men over 40 can use to maintain strength and mobility" required></textarea>
+<label for="format">Content format</label><select id="format"><option>Instagram Reel</option><option>Instagram carousel</option><option>Instagram caption / photo post</option><option>Instagram Story</option><option>YouTube Short</option></select>
+<label for="goal">Main goal</label><select id="goal"><option>Engagement and meaningful comments</option><option>Educate and build trust</option><option>Grow followers</option><option>Introduce the free guide</option><option>Product interest and conversions</option></select>
+<label for="cta">Call to action</label><input id="cta" value="Ask viewers to comment with their experience">
+<label for="extra">Extra instructions (optional)</label><textarea id="extra" placeholder="Tone, visual direction, preferred hook, or anything to avoid…"></textarea>
+<div class="actions"><span class="hint">Creates a draft · Nothing is published</span><button id="create" type="submit">Create content</button></div>
+</form>
+<div class="label">CONTENT DRAFT</div><div id="contentOutput" class="output">Your generated Reel or carousel draft will appear here.</div>
+<button id="copyContent" class="small" type="button" disabled>Copy content</button>
+</section>
+<footer>Review all content and health claims before posting. Sales replies and posts are drafts only; nothing is sent or published automatically.</footer>
 </main>
 <script>
-const chat=document.getElementById('chat'),form=document.getElementById('form'),input=document.getElementById('message'),send=document.getElementById('send'),statusEl=document.getElementById('status');
-const history=[];
-function bubble(role,text){const box=document.createElement('div');box.className='msg '+role;const label=document.createElement('div');label.className='label';label.textContent=role==='user'?'Follower message':'Draft reply';const body=document.createElement('div');body.textContent=text;box.append(label,body);if(role==='assistant'){const copy=document.createElement('button');copy.className='small';copy.type='button';copy.textContent='Copy draft';copy.onclick=async()=>{await navigator.clipboard.writeText(text);copy.textContent='Copied';};box.append(copy);}chat.append(box);chat.scrollTop=chat.scrollHeight;}
+const $=id=>document.getElementById(id);
+document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===btn.dataset.tab));}));
+const chat=$('chat'),salesForm=$('salesForm'),input=$('message'),send=$('send'),statusEl=$('status'),history=[];
+function bubble(role,text){const box=document.createElement('div');box.className='msg '+role;const label=document.createElement('div');label.className='label';label.textContent=role==='user'?'Follower message':'Draft reply';const body=document.createElement('div');body.textContent=text;box.append(label,body);if(role==='assistant'){const copy=document.createElement('button');copy.className='small';copy.type='button';copy.textContent='Copy draft';copy.onclick=async()=>{await navigator.clipboard.writeText(text);copy.textContent='Copied';};box.append(copy);}chat.append(box);box.scrollIntoView({behavior:'smooth',block:'nearest'});}
 fetch('/health').then(r=>r.json()).then(h=>{statusEl.textContent=h.ollamaConfigured?'Connected · '+h.ollamaModel:'Agent needs configuration';}).catch(()=>{statusEl.textContent='Could not check connection';});
-form.addEventListener('submit',async e=>{e.preventDefault();const message=input.value.trim();if(!message)return;bubble('user',message);input.value='';send.disabled=true;send.textContent='Thinking…';statusEl.textContent='Generating a draft…';try{const response=await fetch('/agent/draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message,history})});const data=await response.json();if(!response.ok)throw new Error(data.error||'Draft request failed');bubble('assistant',data.draft||'No draft returned.');history.push({role:'user',content:message},{role:'assistant',content:data.draft||''});while(history.length>12)history.shift();statusEl.textContent='Ready · '+(data.model||'Ollama');}catch(err){bubble('assistant','I could not generate a draft: '+err.message);statusEl.textContent='Draft failed — check connection';}finally{send.disabled=false;send.textContent='Draft reply';input.focus();}});
+salesForm.addEventListener('submit',async e=>{e.preventDefault();const message=input.value.trim();if(!message)return;bubble('user',message);input.value='';send.disabled=true;send.textContent='Thinking…';statusEl.textContent='Generating a sales reply…';try{const r=await fetch('/agent/draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message,history})});const data=await r.json();if(!r.ok)throw new Error(data.error||'Draft request failed');bubble('assistant',data.draft||'No draft returned.');history.push({role:'user',content:message},{role:'assistant',content:data.draft||''});while(history.length>12)history.shift();statusEl.textContent='Ready · '+(data.model||'Ollama');}catch(err){bubble('assistant','Could not generate a draft: '+err.message);statusEl.textContent='Draft failed';}finally{send.disabled=false;send.textContent='Draft reply';input.focus();}});
+$('contentForm').addEventListener('submit',async e=>{e.preventDefault();const btn=$('create'),out=$('contentOutput');btn.disabled=true;btn.textContent='Creating…';out.textContent='Generating your content draft…';statusEl.textContent='Content Agent is working…';try{const body={topic:$('topic').value.trim(),platform:$('format').value,format:$('format').value,goal:$('goal').value,cta:$('cta').value,instructions:$('extra').value};const r=await fetch('/content/create',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw new Error(data.error||'Content request failed');out.textContent=data.content||'No content returned.';$('copyContent').disabled=!data.content;statusEl.textContent='Content draft ready · '+(data.model||'Ollama');}catch(err){out.textContent='Could not create content: '+err.message;statusEl.textContent='Content generation failed';}finally{btn.disabled=false;btn.textContent='Create content';}});
+$('copyContent').addEventListener('click',async()=>{await navigator.clipboard.writeText($('contentOutput').textContent);$('copyContent').textContent='Copied';setTimeout(()=>$('copyContent').textContent='Copy content',1500);});
 </script></body></html>
