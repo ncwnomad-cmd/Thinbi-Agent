@@ -15,7 +15,21 @@ services:
         sync: false
       - key: META_VERIFY_TOKEN
         sync: false
+      - key: META_APP_SECRET
+        sync: false
       - key: META_ACCESS_TOKEN
         sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v26.0
       - key: INSTAGRAM_ACCOUNT_ID
+        sync: false
+      - key: INSTAGRAM_AUTO_DMS_ENABLED
+        value: "false"
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: OLLAMA_MODEL
+        value: qwen2.5:1.5b
+      - key: DATA_DIR
         sync: false

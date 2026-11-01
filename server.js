@@ -1,6 +1,8 @@
 import express from "express";
 import "dotenv/config";
 import { readFileSync } from "node:fs";
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import OpenAI from "openai";
 import { Composio } from "@composio/core";
@@ -15,18 +17,56 @@ const INSTAGRAM_AUTH_CONFIG_ID = process.env.COMPOSIO_INSTAGRAM_AUTH_CONFIG_ID;
 let composio;
 let session;
 
-// Comment-to-DM starts in review-only mode. No webhook event can send a DM.
+// Comment-to-DM remains disabled until Meta credentials, permissions and webhook
+// subscriptions have been verified. Persistent state is stored under DATA_DIR.
+// On Render, DATA_DIR must point to a mounted persistent disk to survive deploys.
+const DATA_DIR = process.env.DATA_DIR || "./data";
+const STATE_FILE = join(DATA_DIR, "instagram-agent-state.json");
 const pendingComments = new Map();
-// Product behavior: one initial comment-triggered DM per follower, not one per comment.
-// Meta also limits private replies to one per comment.
 const processedFollowerIds = new Set();
 const processedMessageIds = new Set();
 const dmHistory = new Map();
+const followerReservations = new Map();
+const inFlightFollowers = new Set();
+const inFlightMessages = new Set();
 const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
+let saveQueue = Promise.resolve();
+
+async function loadPersistentState() {
+  await mkdir(dirname(STATE_FILE), { recursive: true });
+  try {
+    const raw = await readFile(STATE_FILE, "utf8");
+    const state = JSON.parse(raw);
+    for (const id of state.processedFollowerIds || []) processedFollowerIds.add(id);
+    for (const id of state.processedMessageIds || []) processedMessageIds.add(id);
+    for (const [id, item] of state.followerReservations || []) followerReservations.set(id, item);
+    for (const [id, item] of state.pendingComments || []) pendingComments.set(id, item);
+    for (const [id, items] of state.dmHistory || []) dmHistory.set(id, items);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+function persistState() {
+  const state = JSON.stringify({
+    processedFollowerIds: [...processedFollowerIds],
+    processedMessageIds: [...processedMessageIds],
+    followerReservations: [...followerReservations.entries()],
+    pendingComments: [...pendingComments.entries()],
+    dmHistory: [...dmHistory.entries()]
+  });
+  saveQueue = saveQueue.then(async () => {
+    await mkdir(dirname(STATE_FILE), { recursive: true });
+    const temp = STATE_FILE + ".tmp";
+    await writeFile(temp, state, "utf8");
+    await rename(temp, STATE_FILE);
+  });
+  return saveQueue;
+}
 
 function verifyMetaSignature(req) {
   const secret = process.env.META_APP_SECRET;
-  if (!secret) return process.env.NODE_ENV !== "production";
+  if (!secret) return false;
   const signature = req.get("x-hub-signature-256") || "";
   if (!signature.startsWith("sha256=") || !req.rawBody) return false;
   const expected = createHmac("sha256", secret).update(req.rawBody).digest("hex");
@@ -55,39 +95,57 @@ async function sendInstagramMessage(recipient, text) {
   return metaPost(accountId + "/messages", { recipient, message: { text } });
 }
 
+async function sendPrivateCommentReply(commentId, text) {
+  // Meta's Instagram Messaging API accepts the comment ID as recipient.comment_id.
+  return sendInstagramMessage({ comment_id: commentId }, text);
+}
+
 async function sendPublicCommentReply(commentId, text) {
   return metaPost(commentId + "/replies", { message: text });
 }
 
 async function receiveComment(comment) {
-  const id = String(comment?.id || "");
+  const id = String(comment?.id || comment?.comment_id || "").trim();
   const text = String(comment?.text || "").trim().slice(0, 2000);
   const username = String(comment?.from?.username || "Instagram user");
-  const followerId = String(comment?.from?.id || username).toLocaleLowerCase();
-  if (!id || processedFollowerIds.has(followerId)) return;
-  processedFollowerIds.add(followerId);
+  const followerId = String(comment?.from?.id || "").trim();
+  if (!id || !followerId) {
+    console.warn("Ignoring comment event without a comment ID or commenter ID.");
+    return;
+  }
+  if (processedFollowerIds.has(followerId) || followerReservations.has(followerId) || inFlightFollowers.has(followerId)) return;
+  inFlightFollowers.add(followerId);
   const item = {
     id, text: text || "[Comment without text]",
-    username,
-    followerId,
+    username, followerId,
     mediaId: String(comment?.media?.id || comment?.media_id || ""),
     receivedAt: new Date().toISOString(),
     draft: "Thanks for commenting! I appreciate you being here.",
     status: "draft_ready"
   };
-  pendingComments.set(followerId, item);
+  pendingComments.set(id, item);
+  let privateSendAttempted = false;
+  let privateReplySent = false;
   try {
+    if (AUTO_DMS_ENABLED) {
+      // Reserve the follower before sending to prevent duplicate DMs after restarts.
+      followerReservations.set(followerId, { commentId: id, status: "reserved", createdAt: item.receivedAt });
+      await persistState();
+    }
     const result = await callOllama(
-      loadAgentInstructions() + "\\n\\nWrite the single first private reply to this Instagram comment. Respond naturally to the comment. If the person clearly asks for the free guide, include https://40roadmap.netlify.app. Mention a product only when they clearly ask about it, and include the required affiliate disclosure. Do not begin a multi-message pitch. Keep it concise.",
+      loadAgentInstructions() + "\n\nWrite the single first private reply to this Instagram comment. Respond naturally to the comment. If the person clearly asks for the free guide, include https://40roadmap.netlify.app. Mention a product only when they clearly ask about it, and include the required affiliate disclosure. Do not begin a multi-message pitch. Keep it concise.",
       "Comment from @" + item.username + ": " + item.text,
       180
     );
-    item.draft = result.output_text || item.draft;
+    item.draft = String(result.output_text || item.draft).trim().slice(0, 1000);
     if (AUTO_DMS_ENABLED) {
-      await sendInstagramMessage({ comment_id: id }, item.draft);
+      privateSendAttempted = true;
+      await sendPrivateCommentReply(id, item.draft);
+      privateReplySent = true;
       item.status = "dm_sent";
-      // Rotate natural-sounding public acknowledgements so every comment does not
-      // receive the exact same canned line. Only post after the DM succeeds.
+      processedFollowerIds.add(followerId);
+      followerReservations.set(followerId, { commentId: id, status: "sent", sentAt: new Date().toISOString() });
+      await persistState();
       const publicReplies = [
         "Thanks for commenting! Check your DMs 😊",
         "Appreciate you! I just sent you a message.",
@@ -104,11 +162,25 @@ async function receiveComment(comment) {
       item.publicReply = publicReply;
     }
   } catch (error) {
-    item.status = AUTO_DMS_ENABLED ? "send_failed" : "draft_ready";
+    if (privateReplySent) {
+      item.status = "dm_sent_public_reply_failed";
+    } else if (privateSendAttempted) {
+      item.status = "send_failed_reserved";
+      const reservation = followerReservations.get(followerId);
+      if (reservation) {
+        reservation.status = "send_failed_reserved";
+        reservation.error = String(error.message || "send failed").slice(0, 300);
+      }
+    } else {
+      item.status = AUTO_DMS_ENABLED ? "draft_failed_retryable" : "draft_ready";
+      followerReservations.delete(followerId);
+    }
     console.error("Comment private reply processing failed:", error.message);
+  } finally {
+    inFlightFollowers.delete(followerId);
+    pendingComments.set(id, item);
+    await persistState();
   }
-  pendingComments.set(followerId, item);
-  if (processedFollowerIds.size > 10000) processedFollowerIds.delete(processedFollowerIds.values().next().value);
 }
 
 async function receiveInstagramMessage(event) {
@@ -116,23 +188,27 @@ async function receiveInstagramMessage(event) {
   const messageId = String(event?.message?.mid || "");
   const text = String(event?.message?.text || "").trim().slice(0, 2000);
   const timestamp = Number(event?.timestamp || 0);
-  if (!AUTO_DMS_ENABLED || !senderId || !messageId || !text || event?.message?.is_echo || processedMessageIds.has(messageId)) return;
-  // Only answer a genuine inbound message, inside Meta's standard 24-hour window.
+  if (!AUTO_DMS_ENABLED || !senderId || !messageId || !text || event?.message?.is_echo || processedMessageIds.has(messageId) || inFlightMessages.has(messageId)) return;
   if (!timestamp || Date.now() - timestamp > 24 * 60 * 60 * 1000 || timestamp > Date.now() + 60000) return;
-  processedMessageIds.add(messageId);
-  const history = dmHistory.get(senderId) || [];
-  history.push({ role: "user", content: text });
-  const response = await callOllama(
-    loadAgentInstructions() + "\\n\\nYou are Kai's Instagram sales assistant. Continue the conversation naturally in DM, answer the person's actual question, ask at most one useful question, and offer relevant help without pressure. Share the free guide when asked. Share affiliate product links only when the person expresses clear interest and always include the affiliate disclosure. Do not make medical claims or invent product facts. Reply only to this inbound message.",
-    history,
-    250
-  );
-  const reply = String(response.output_text || "").trim();
-  if (!reply) return;
-  await sendInstagramMessage({ id: senderId }, reply);
-  history.push({ role: "assistant", content: reply });
-  dmHistory.set(senderId, history.slice(-12));
-  if (processedMessageIds.size > 10000) processedMessageIds.delete(processedMessageIds.values().next().value);
+  inFlightMessages.add(messageId);
+  try {
+    const history = dmHistory.get(senderId) || [];
+    history.push({ role: "user", content: text });
+    const response = await callOllama(
+      loadAgentInstructions() + "\n\nYou are Kai's Instagram sales assistant. Continue naturally, answer the actual question, ask at most one useful question, and offer relevant help without pressure. Share the free guide when asked. Share affiliate links only with clear interest and always include the affiliate disclosure. Do not make medical claims or invent product facts.",
+      history,
+      250
+    );
+    const reply = String(response.output_text || "").trim().slice(0, 1000);
+    if (!reply) return;
+    await sendInstagramMessage({ id: senderId }, reply);
+    history.push({ role: "assistant", content: reply });
+    dmHistory.set(senderId, history.slice(-12));
+    processedMessageIds.add(messageId);
+    await persistState();
+  } finally {
+    inFlightMessages.delete(messageId);
+  }
 }
 
 async function callOllama(instructions, input, maxTokens) {
@@ -225,7 +301,9 @@ app.get("/health", (_req, res) => res.json({
   metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_APP_SECRET && process.env.META_ACCESS_TOKEN && process.env.INSTAGRAM_ACCOUNT_ID && process.env.META_GRAPH_API_VERSION),
   automatedRepliesEnabled: AUTO_DMS_ENABLED,
   commentRepliesPerComment: 1,
-  dmSalesConversationEnabled: AUTO_DMS_ENABLED
+  dmSalesConversationEnabled: AUTO_DMS_ENABLED,
+  stateStorage: "file",
+  dataDirConfigured: Boolean(process.env.DATA_DIR)
 }));
 
 app.post("/agent/draft", async (req, res, next) => {
@@ -235,8 +313,9 @@ app.post("/agent/draft", async (req, res, next) => {
 
     // Deterministic offer-link routing for direct requests. This avoids relying on
     // a small local model to reproduce exact URLs from its knowledge prompt.
-    const asksForGuide = /\\b(guide|roadmap|57[- ]?29|free plan|free routine)\\b/i.test(message)
-      && /\\b(send|share|link|where|give|get|download|please|can i have|could i have)\\b/i.test(message);
+    const normalizedMessage = message.toLowerCase();
+    const asksForGuide = /\b(guide|roadmap|57[- ]?29|free plan|free routine)\b/i.test(normalizedMessage)
+      && /\b(send|share|link|where|give|get|download|please|can i have|could i have)\b/i.test(normalizedMessage);
     if (asksForGuide) {
       return res.json({
         ok: true,
@@ -342,7 +421,7 @@ app.post("/composio/search", async (req, res, next) => {
 });
 
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === process.env.META_VERIFY_TOKEN) {
+  if (process.env.META_VERIFY_TOKEN && req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === process.env.META_VERIFY_TOKEN) {
     return res.status(200).send(req.query["hub.challenge"]);
   }
   return res.sendStatus(403);
@@ -380,5 +459,10 @@ app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.message || "Internal server error" });
 });
 
-app.listen(PORT, () => console.log(`Thinbi Instagram agent listening on port ${PORT}`));
+loadPersistentState().then(() => {
+  app.listen(PORT, () => console.log(`Thinbi Instagram agent listening on port ${PORT}`));
+}).catch((error) => {
+  console.error("Could not load persistent Instagram state:", error);
+  process.exit(1);
+});
 
