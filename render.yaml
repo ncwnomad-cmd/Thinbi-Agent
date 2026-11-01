@@ -5,6 +5,12 @@ services:
     buildCommand: npm install
     startCommand: npm start
     envVars:
+      - key: COMPOSIO_API_KEY
+        sync: false
+      - key: COMPOSIO_USER_ID
+        value: thinbi-instagram-owner
+      - key: COMPOSIO_INSTAGRAM_AUTH_CONFIG_ID
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: META_VERIFY_TOKEN
