@@ -86,10 +86,22 @@ async function receiveComment(comment) {
     if (AUTO_DMS_ENABLED) {
       await sendInstagramMessage({ comment_id: id }, item.draft);
       item.status = "dm_sent";
-      // Publicly acknowledge only after Meta confirms the private reply was sent.
-      await sendPublicCommentReply(id, "Thanks for commenting! Just sent you a DM. 😊");
+      // Rotate natural-sounding public acknowledgements so every comment does not
+      // receive the exact same canned line. Only post after the DM succeeds.
+      const publicReplies = [
+        "Thanks for commenting! Check your DMs 😊",
+        "Appreciate you! I just sent you a message.",
+        "Thanks for joining in — sent you a DM!",
+        "Just messaged you. Thanks for being here! 🙌",
+        "Thanks! Take a look in your inbox when you get a chance.",
+        "Appreciate the comment! Check your messages 😊",
+        "I sent you a quick message — thanks!",
+        "Thanks for chiming in! Just dropped you a DM."
+      ];
+      const publicReply = publicReplies[Math.floor(Math.random() * publicReplies.length)];
+      await sendPublicCommentReply(id, publicReply);
       item.status = "dm_and_comment_reply_sent";
-      item.publicReply = "Thanks for commenting! Just sent you a DM. 😊";
+      item.publicReply = publicReply;
     }
   } catch (error) {
     item.status = AUTO_DMS_ENABLED ? "send_failed" : "draft_ready";
