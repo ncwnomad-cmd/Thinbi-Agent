@@ -17,9 +17,9 @@ let session;
 
 // Comment-to-DM starts in review-only mode. No webhook event can send a DM.
 const pendingComments = new Map();
-// Meta permits one private reply per comment. A later comment by the same person
-// can receive its own private reply; duplicates of the same webhook event are ignored.
-const processedCommentIds = new Set();
+// Product behavior: one initial comment-triggered DM per follower, not one per comment.
+// Meta also limits private replies to one per comment.
+const processedFollowerIds = new Set();
 const processedMessageIds = new Set();
 const dmHistory = new Map();
 const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
@@ -53,18 +53,20 @@ async function sendInstagramMessage(recipient, text) {
 async function receiveComment(comment) {
   const id = String(comment?.id || "");
   const text = String(comment?.text || "").trim().slice(0, 2000);
-  if (!id || processedCommentIds.has(id)) return;
-  processedCommentIds.add(id);
+  const username = String(comment?.from?.username || "Instagram user");
+  const followerId = String(comment?.from?.id || username).toLocaleLowerCase();
+  if (!id || processedFollowerIds.has(followerId)) return;
+  processedFollowerIds.add(followerId);
   const item = {
     id, text: text || "[Comment without text]",
-    username: String(comment?.from?.username || "Instagram user"),
-    followerId: String(comment?.from?.id || ""),
+    username,
+    followerId,
     mediaId: String(comment?.media?.id || comment?.media_id || ""),
     receivedAt: new Date().toISOString(),
     draft: "Thanks for commenting! I appreciate you being here.",
     status: "draft_ready"
   };
-  pendingComments.set(id, item);
+  pendingComments.set(followerId, item);
   try {
     const result = await callOllama(
       loadAgentInstructions() + "\\n\\nWrite the single first private reply to this Instagram comment. Respond naturally to the comment. If the person clearly asks for the free guide, include https://40roadmap.netlify.app. Mention a product only when they clearly ask about it, and include the required affiliate disclosure. Do not begin a multi-message pitch. Keep it concise.",
@@ -80,8 +82,8 @@ async function receiveComment(comment) {
     item.status = AUTO_DMS_ENABLED ? "send_failed" : "draft_ready";
     console.error("Comment private reply processing failed:", error.message);
   }
-  pendingComments.set(id, item);
-  if (processedCommentIds.size > 10000) processedCommentIds.delete(processedCommentIds.values().next().value);
+  pendingComments.set(followerId, item);
+  if (processedFollowerIds.size > 10000) processedFollowerIds.delete(processedFollowerIds.values().next().value);
 }
 
 async function receiveInstagramMessage(event) {
