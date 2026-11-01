@@ -1,11 +1,12 @@
 import express from "express";
 import "dotenv/config";
 import { readFileSync } from "node:fs";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import OpenAI from "openai";
 import { Composio } from "@composio/core";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "1mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 
 const PORT = Number(process.env.PORT || 3000);
 const USER_ID = process.env.COMPOSIO_USER_ID || "thinbi-instagram-owner";
@@ -13,6 +14,54 @@ const INSTAGRAM_AUTH_CONFIG_ID = process.env.COMPOSIO_INSTAGRAM_AUTH_CONFIG_ID;
 
 let composio;
 let session;
+
+// Comment-to-DM starts in review-only mode. No webhook event can send a DM.
+const pendingComments = new Map();
+// One reply per follower, even if that follower leaves multiple comments.
+const processedFollowerIds = new Set();
+const COMMENT_KEYWORDS = [
+  { keywords: ["guide", "routine", "strength", "plan", "mobility"], reply: "Absolutely! Here's my free guide: https://40roadmap.netlify.app" },
+  { keywords: ["creatine"], reply: "Thanks for asking about creatine. I can share the creatine gummies I use: https://tr.ee/zHRd3B\n\nThis is my affiliate link, so I may earn a commission if you purchase through it." },
+  { keywords: ["nad"], reply: "Thanks for asking about NAD+. Here's the product I use: https://linktwin.co/zYyQqX\n\nThis is my affiliate link, so I may earn a commission if you purchase through it." }
+];
+
+function verifyMetaSignature(req) {
+  const secret = process.env.META_APP_SECRET;
+  if (!secret) return process.env.NODE_ENV !== "production";
+  const signature = req.get("x-hub-signature-256") || "";
+  if (!signature.startsWith("sha256=") || !req.rawBody) return false;
+  const expected = createHmac("sha256", secret).update(req.rawBody).digest("hex");
+  const actual = signature.slice(7);
+  return actual.length === expected.length && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+function receiveComment(comment) {
+  const id = String(comment?.id || "");
+  const username = String(comment?.from?.username || "Instagram user");
+  const followerId = String(comment?.from?.id || username).toLocaleLowerCase();
+  const text = String(comment?.text || "").trim().slice(0, 2000);
+  if (!id || processedFollowerIds.has(followerId)) return;
+  processedFollowerIds.add(followerId);
+  const item = {
+    id, followerId, text: text || "[Comment without text]",
+    username,
+    mediaId: String(comment?.media?.id || comment?.media_id || ""),
+    receivedAt: new Date().toISOString(),
+    draft: "Thanks for commenting! I appreciate you being here.",
+    status: "draft_ready"
+  };
+  pendingComments.set(followerId, item);
+  // Prepare exactly one reply for this follower. Sending remains disabled.
+  callOllama(
+    loadAgentInstructions() + "\\n\\nDraft exactly one short Instagram private reply to this follower's comment. Respond naturally to its content. No follow-up sequence, no forced product pitch, and no unnecessary link. Never claim the DM has been sent.",
+    "Comment from @" + item.username + ": " + item.text,
+    120
+  ).then(result => {
+    const current = pendingComments.get(followerId);
+    if (current) current.draft = result.output_text || current.draft;
+  }).catch(error => console.error("Could not draft comment reply:", error.message));
+  if (processedFollowerIds.size > 10000) processedFollowerIds.delete(processedFollowerIds.values().next().value);
+}
 
 async function callOllama(instructions, input, maxTokens) {
   const baseUrl = process.env.OLLAMA_BASE_URL;
@@ -214,9 +263,29 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", (req, res) => {
-  // Acknowledge webhook events only. Automated replies and publishing remain disabled.
-  console.log("Meta webhook event received:", JSON.stringify(req.body).slice(0, 1500));
-  res.sendStatus(200);
+  if (!verifyMetaSignature(req)) return res.sendStatus(401);
+  try {
+    for (const entry of req.body?.entry || []) {
+      for (const change of entry?.changes || []) {
+        if (change?.field === "comments") receiveComment(change.value || {});
+      }
+    }
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Meta webhook processing failed:", error);
+    res.sendStatus(200);
+  }
+});
+
+// Review queue for incoming Instagram comments. This never sends a message.
+app.get("/comments/pending", (_req, res) => {
+  res.json({ ok: true, mode: "approval_only", comments: [...pendingComments.values()].sort((a,b) => b.receivedAt.localeCompare(a.receivedAt)) });
+});
+
+app.post("/comments/:id/dismiss", (req, res) => {
+  const id = String(req.params.id || "");
+  const existed = pendingComments.delete(id);
+  res.json({ ok: true, dismissed: existed });
 });
 
 app.use((err, _req, res, _next) => {
