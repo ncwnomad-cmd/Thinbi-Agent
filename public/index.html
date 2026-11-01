@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kai's Instagram Assistant</title>
+<style>
+:root{color-scheme:dark;--bg:#101714;--panel:#19231e;--line:#304238;--muted:#a9b8ae;--accent:#b8e3c5;--ink:#f2f7f3}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,Arial,sans-serif}
+main{max-width:850px;margin:0 auto;min-height:100vh;padding:28px 18px;display:flex;flex-direction:column}
+header{padding:12px 4px 22px;border-bottom:1px solid var(--line)}h1{font-size:23px;margin:0 0 4px}header p,.hint{color:var(--muted);margin:0}
+#status{font-size:12px;color:var(--accent);margin-top:9px}
+#chat{flex:1;min-height:360px;padding:22px 0;display:flex;flex-direction:column;gap:14px}
+.msg{max-width:88%;padding:13px 15px;border-radius:15px;white-space:pre-wrap;overflow-wrap:anywhere}
+.user{align-self:flex-end;background:#294536}.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--line)}
+.label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+form{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:12px}
+textarea{display:block;width:100%;resize:vertical;min-height:85px;background:transparent;color:var(--ink);border:0;outline:0;font:inherit}
+.actions{display:flex;justify-content:space-between;align-items:center;gap:12px;padding-top:8px}
+button{background:var(--accent);color:#102017;border:0;border-radius:999px;padding:10px 18px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}.small{background:transparent;color:var(--accent);border:1px solid var(--line);padding:6px 12px;font-size:12px}
+footer{font-size:12px;color:var(--muted);padding:12px 3px}
+</style></head>
+<body><main>
+<header><h1>Kai's Instagram Assistant</h1><p>Draft replies for @ismyguthappy. Review and copy before sending.</p><div id="status">Checking agent connection…</div></header>
+<section id="chat" aria-live="polite"><div class="msg assistant"><div class="label">Assistant</div>Hi! Paste a follower's message below and I'll draft a natural reply. Nothing is sent automatically.</div></section>
+<form id="form"><textarea id="message" maxlength="4000" placeholder="Paste the follower's message here…" required></textarea><div class="actions"><span class="hint" id="note">Draft only · Not connected to automatic sending</span><button id="send" type="submit">Draft reply</button></div></form>
+<footer>Check health and product claims before sending. Affiliate links must include the required disclosure.</footer>
+</main>
+<script>
+const chat=document.getElementById('chat'),form=document.getElementById('form'),input=document.getElementById('message'),send=document.getElementById('send'),statusEl=document.getElementById('status');
+const history=[];
+function bubble(role,text){const box=document.createElement('div');box.className='msg '+role;const label=document.createElement('div');label.className='label';label.textContent=role==='user'?'Follower message':'Draft reply';const body=document.createElement('div');body.textContent=text;box.append(label,body);if(role==='assistant'){const copy=document.createElement('button');copy.className='small';copy.type='button';copy.textContent='Copy draft';copy.onclick=async()=>{await navigator.clipboard.writeText(text);copy.textContent='Copied';};box.append(copy);}chat.append(box);chat.scrollTop=chat.scrollHeight;}
+fetch('/health').then(r=>r.json()).then(h=>{statusEl.textContent=h.ollamaConfigured?'Connected · '+h.ollamaModel:'Agent needs configuration';}).catch(()=>{statusEl.textContent='Could not check connection';});
+form.addEventListener('submit',async e=>{e.preventDefault();const message=input.value.trim();if(!message)return;bubble('user',message);input.value='';send.disabled=true;send.textContent='Thinking…';statusEl.textContent='Generating a draft…';try{const response=await fetch('/agent/draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message,history})});const data=await response.json();if(!response.ok)throw new Error(data.error||'Draft request failed');bubble('assistant',data.draft||'No draft returned.');history.push({role:'user',content:message},{role:'assistant',content:data.draft||''});while(history.length>12)history.shift();statusEl.textContent='Ready · '+(data.model||'Ollama');}catch(err){bubble('assistant','I could not generate a draft: '+err.message);statusEl.textContent='Draft failed — check connection';}finally{send.disabled=false;send.textContent='Draft reply';input.focus();}});
+</script></body></html>

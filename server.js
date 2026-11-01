@@ -79,11 +79,9 @@ async function getInstagramConnection() {
   return result.items?.find((item) => item.status === "ACTIVE" && !item.isDisabled) || null;
 }
 
-app.get("/", (_req, res) => res.json({
-  status: "ok",
-  service: "thinbi-instagram-agent",
-  version: "0.4.0"
-}));
+app.get("/", (_req, res) => {
+  res.type("html").send(readFileSync(new URL("./public/index.html", import.meta.url), "utf8"));
+});
 
 app.get("/health", (_req, res) => res.json({
   ok: true,
