@@ -3,7 +3,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual, createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import OpenAI from "openai";
 import { Composio } from "@composio/core";
 
@@ -54,7 +54,31 @@ const dmHistory = new Map();
 const followerReservations = new Map();
 const inFlightFollowers = new Set();
 const inFlightMessages = new Set();
+let metaCredentials = null;
+const metaOAuthStates = new Map();
 const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
+
+function metaCredentialKey() {
+  const secret = process.env.META_BUSINESS_APP_SECRET;
+  if (!secret || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Meta OAuth secret and Supabase service key are required to protect connected credentials.");
+  return createHash("sha256").update(secret).update(SUPABASE_SERVICE_ROLE_KEY).digest();
+}
+
+function encryptMetaCredentials(value) {
+  if (!value) return null;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", metaCredentialKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
+  return { iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: encrypted.toString("base64") };
+}
+
+function decryptMetaCredentials(value) {
+  if (!value?.iv || !value?.tag || !value?.data) return null;
+  const decipher = createDecipheriv("aes-256-gcm", metaCredentialKey(), Buffer.from(value.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(value.tag, "base64"));
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]);
+  return JSON.parse(decrypted.toString("utf8"));
+}
 let saveQueue = Promise.resolve();
 
 function serializePersistentState() {
@@ -63,7 +87,8 @@ function serializePersistentState() {
     processedMessageIds: [...processedMessageIds],
     followerReservations: [...followerReservations.entries()],
     pendingComments: [...pendingComments.entries()],
-    dmHistory: [...dmHistory.entries()]
+    dmHistory: [...dmHistory.entries()],
+    metaCredentials: metaCredentials ? encryptMetaCredentials(metaCredentials) : null
   };
 }
 
@@ -73,6 +98,7 @@ function applyPersistentState(state = {}) {
   for (const [id, item] of state.followerReservations || []) followerReservations.set(id, item);
   for (const [id, item] of state.pendingComments || []) pendingComments.set(id, item);
   for (const [id, items] of state.dmHistory || []) dmHistory.set(id, items);
+  if (state.metaCredentials) metaCredentials = decryptMetaCredentials(state.metaCredentials);
 }
 
 async function loadPersistentState() {
@@ -125,8 +151,16 @@ function verifyMetaSignature(req) {
   return actual.length === expected.length && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
+function getMetaAccessToken() {
+  return metaCredentials?.pageAccessToken || process.env.META_ACCESS_TOKEN || "";
+}
+
+function getInstagramAccountId() {
+  return metaCredentials?.instagramAccountId || process.env.INSTAGRAM_ACCOUNT_ID || "";
+}
+
 async function metaPost(path, body) {
-  const token = process.env.META_ACCESS_TOKEN;
+  const token = getMetaAccessToken();
   const version = process.env.META_GRAPH_API_VERSION;
   if (!token || !version) throw new Error("Instagram messaging credentials are not fully configured.");
   const response = await fetch(`https://graph.facebook.com/${version}/${path}`, {
@@ -141,7 +175,7 @@ async function metaPost(path, body) {
 }
 
 async function sendInstagramMessage(recipient, text) {
-  const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+  const accountId = getInstagramAccountId();
   if (!accountId) throw new Error("INSTAGRAM_ACCOUNT_ID is not configured.");
   return metaPost(accountId + "/messages", { recipient, message: { text } });
 }
@@ -349,7 +383,9 @@ app.get("/health", (_req, res) => res.json({
   ollamaConfigured: Boolean(process.env.OLLAMA_BASE_URL && process.env.OLLAMA_API_KEY),
   ollamaModel: process.env.OLLAMA_MODEL || "qwen2.5:1.5b",
   agentKnowledgeLoaded: true,
-  metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_APP_SECRET && process.env.META_ACCESS_TOKEN && process.env.INSTAGRAM_ACCOUNT_ID && process.env.META_GRAPH_API_VERSION),
+  metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_APP_SECRET && getMetaAccessToken() && getInstagramAccountId() && process.env.META_GRAPH_API_VERSION),
+  metaOAuthConfigured: Boolean(process.env.META_BUSINESS_APP_ID && process.env.META_BUSINESS_APP_SECRET && process.env.META_BUSINESS_CONFIG_ID && SUPABASE_SERVICE_ROLE_KEY),
+  instagramAccountConnected: Boolean(metaCredentials?.instagramAccountId),
   automatedRepliesEnabled: AUTO_DMS_ENABLED,
   commentRepliesPerComment: 1,
   dmSalesConversationEnabled: AUTO_DMS_ENABLED,
@@ -470,6 +506,85 @@ app.post("/composio/search", async (req, res, next) => {
     const result = await s.search({ query, toolkits: ["instagram"] });
     res.json({ ok: true, results: result });
   } catch (e) { next(e); }
+});
+
+app.get("/auth/meta/start", (_req, res) => {
+  const appId = process.env.META_BUSINESS_APP_ID;
+  const configId = process.env.META_BUSINESS_CONFIG_ID;
+  const appSecret = process.env.META_BUSINESS_APP_SECRET;
+  const redirectUri = process.env.META_BUSINESS_REDIRECT_URI || "https://thinbi-agent.onrender.com/auth/meta/callback";
+  if (!appId || !configId || !appSecret || !SUPABASE_SERVICE_ROLE_KEY) {
+    return res.status(503).json({ error: "Meta Business OAuth is not configured. Set META_BUSINESS_APP_ID, META_BUSINESS_APP_SECRET, META_BUSINESS_CONFIG_ID, and the Supabase service key first." });
+  }
+  const state = randomBytes(32).toString("hex");
+  metaOAuthStates.set(state, Date.now());
+  const url = new URL("https://www.facebook.com/v26.0/dialog/oauth");
+  url.searchParams.set("client_id", appId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("config_id", configId);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("override_default_response_type", "true");
+  url.searchParams.set("state", state);
+  res.redirect(url.toString());
+});
+
+app.get("/auth/meta/callback", async (req, res) => {
+  try {
+    if (req.query.error) return res.status(400).send("Meta authorization was not completed. You can close this page and try again.");
+    const code = String(req.query.code || "");
+    const state = String(req.query.state || "");
+    const startedAt = metaOAuthStates.get(state);
+    if (!code || !state || !startedAt || Date.now() - startedAt > 10 * 60 * 1000) {
+      metaOAuthStates.delete(state);
+      return res.status(400).send("The Meta login state is invalid or expired. Start the connection again.");
+    }
+    metaOAuthStates.delete(state);
+    const appId = process.env.META_BUSINESS_APP_ID;
+    const appSecret = process.env.META_BUSINESS_APP_SECRET;
+    const redirectUri = process.env.META_BUSINESS_REDIRECT_URI || "https://thinbi-agent.onrender.com/auth/meta/callback";
+    const version = process.env.META_GRAPH_API_VERSION || "v26.0";
+    if (!appId || !appSecret || !SUPABASE_SERVICE_ROLE_KEY) return res.status(503).send("Meta OAuth server configuration is incomplete.");
+    const exchangeUrl = new URL("https://graph.facebook.com/" + version + "/oauth/access_token");
+    exchangeUrl.searchParams.set("client_id", appId);
+    exchangeUrl.searchParams.set("client_secret", appSecret);
+    exchangeUrl.searchParams.set("redirect_uri", redirectUri);
+    exchangeUrl.searchParams.set("code", code);
+    const shortResponse = await fetch(exchangeUrl, { signal: AbortSignal.timeout(20000) });
+    const shortData = await shortResponse.json();
+    if (!shortResponse.ok || !shortData.access_token) throw new Error("Meta authorization-code exchange failed: " + JSON.stringify(shortData).slice(0, 300));
+
+    const longUrl = new URL("https://graph.facebook.com/" + version + "/oauth/access_token");
+    longUrl.searchParams.set("grant_type", "fb_exchange_token");
+    longUrl.searchParams.set("client_id", appId);
+    longUrl.searchParams.set("client_secret", appSecret);
+    longUrl.searchParams.set("fb_exchange_token", shortData.access_token);
+    const longResponse = await fetch(longUrl, { signal: AbortSignal.timeout(20000) });
+    const longData = await longResponse.json();
+    if (!longResponse.ok || !longData.access_token) throw new Error("Long-lived Meta token exchange failed: " + JSON.stringify(longData).slice(0, 300));
+
+    const pagesUrl = new URL("https://graph.facebook.com/" + version + "/me/accounts");
+    pagesUrl.searchParams.set("fields", "id,name,access_token,instagram_business_account{id,username}");
+    pagesUrl.searchParams.set("access_token", longData.access_token);
+    const pagesResponse = await fetch(pagesUrl, { signal: AbortSignal.timeout(20000) });
+    const pagesData = await pagesResponse.json();
+    if (!pagesResponse.ok) throw new Error("Could not retrieve connected Pages: " + JSON.stringify(pagesData).slice(0, 300));
+    const connectedPage = (pagesData.data || []).find(page => page.instagram_business_account?.id && page.access_token);
+    if (!connectedPage) throw new Error("No Facebook Page with a linked Instagram professional account was returned. Confirm the Page and Instagram account are assigned to this business and try again.");
+
+    metaCredentials = {
+      pageId: connectedPage.id,
+      pageName: connectedPage.name || "",
+      pageAccessToken: connectedPage.access_token,
+      instagramAccountId: connectedPage.instagram_business_account.id,
+      instagramUsername: connectedPage.instagram_business_account.username || "",
+      connectedAt: new Date().toISOString()
+    };
+    await persistState();
+    res.type("html").send("<!doctype html><html><head><meta charset=utf-8><title>Instagram connected</title></head><body style='font-family:Arial,sans-serif;max-width:640px;margin:60px auto;padding:24px'><h2>Meta connection successful</h2><p>Connected Facebook Page: <strong>" + String(metaCredentials.pageName).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])) + "</strong></p><p>Instagram account: <strong>@" + String(metaCredentials.instagramUsername).replace(/[^a-zA-Z0-9._]/g, "") + "</strong></p><p>Your access credentials have been encrypted and saved. You can close this window.</p></body></html>");
+  } catch (error) {
+    console.error("Meta OAuth callback failed:", error.message);
+    res.status(500).send("Meta connection could not be completed. Check the app configuration and server logs, then try again.");
+  }
 });
 
 app.get("/webhook", (req, res) => {
