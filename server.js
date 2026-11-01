@@ -105,7 +105,7 @@ app.post("/agent/draft", async (req, res, next) => {
     if (asksForGuide) {
       return res.json({
         ok: true,
-        draft: "Absolutely! Here's the free 57-29 Roadmap: https://40roadmap.netlify.app",
+        draft: "Absolutely! Here's my free guide: https://40roadmap.netlify.app",
         sent: false,
         model: "offer-link-rule"
       });
