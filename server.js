@@ -212,6 +212,10 @@ app.get("/terms-of-service.html", (_req, res) => {
   res.type("html").send(readFileSync(new URL("./terms-of-service.html", import.meta.url), "utf8"));
 });
 
+app.get("/data-deletion.html", (_req, res) => {
+  res.type("html").send(readFileSync(new URL("./data-deletion.html", import.meta.url), "utf8"));
+});
+
 app.get("/health", (_req, res) => res.json({
   ok: true,
   composioConfigured: Boolean(process.env.COMPOSIO_API_KEY && INSTAGRAM_AUTH_CONFIG_ID),
