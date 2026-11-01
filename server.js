@@ -17,13 +17,12 @@ let session;
 
 // Comment-to-DM starts in review-only mode. No webhook event can send a DM.
 const pendingComments = new Map();
-// One reply per follower, even if that follower leaves multiple comments.
-const processedFollowerIds = new Set();
-const COMMENT_KEYWORDS = [
-  { keywords: ["guide", "routine", "strength", "plan", "mobility"], reply: "Absolutely! Here's my free guide: https://40roadmap.netlify.app" },
-  { keywords: ["creatine"], reply: "Thanks for asking about creatine. I can share the creatine gummies I use: https://tr.ee/zHRd3B\n\nThis is my affiliate link, so I may earn a commission if you purchase through it." },
-  { keywords: ["nad"], reply: "Thanks for asking about NAD+. Here's the product I use: https://linktwin.co/zYyQqX\n\nThis is my affiliate link, so I may earn a commission if you purchase through it." }
-];
+// Meta permits one private reply per comment. A later comment by the same person
+// can receive its own private reply; duplicates of the same webhook event are ignored.
+const processedCommentIds = new Set();
+const processedMessageIds = new Set();
+const dmHistory = new Map();
+const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
 
 function verifyMetaSignature(req) {
   const secret = process.env.META_APP_SECRET;
@@ -35,32 +34,78 @@ function verifyMetaSignature(req) {
   return actual.length === expected.length && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
-function receiveComment(comment) {
+async function sendInstagramMessage(recipient, text) {
+  const token = process.env.META_ACCESS_TOKEN;
+  const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+  const version = process.env.META_GRAPH_API_VERSION;
+  if (!token || !accountId || !version) throw new Error("Instagram messaging credentials are not fully configured.");
+  const response = await fetch(`https://graph.facebook.com/${version}/${accountId}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ recipient, message: { text }, access_token: token }),
+    signal: AbortSignal.timeout(20000)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error("Instagram send failed (" + response.status + "): " + JSON.stringify(data).slice(0, 500));
+  return data;
+}
+
+async function receiveComment(comment) {
   const id = String(comment?.id || "");
-  const username = String(comment?.from?.username || "Instagram user");
-  const followerId = String(comment?.from?.id || username).toLocaleLowerCase();
   const text = String(comment?.text || "").trim().slice(0, 2000);
-  if (!id || processedFollowerIds.has(followerId)) return;
-  processedFollowerIds.add(followerId);
+  if (!id || processedCommentIds.has(id)) return;
+  processedCommentIds.add(id);
   const item = {
-    id, followerId, text: text || "[Comment without text]",
-    username,
+    id, text: text || "[Comment without text]",
+    username: String(comment?.from?.username || "Instagram user"),
+    followerId: String(comment?.from?.id || ""),
     mediaId: String(comment?.media?.id || comment?.media_id || ""),
     receivedAt: new Date().toISOString(),
     draft: "Thanks for commenting! I appreciate you being here.",
     status: "draft_ready"
   };
-  pendingComments.set(followerId, item);
-  // Prepare exactly one reply for this follower. Sending remains disabled.
-  callOllama(
-    loadAgentInstructions() + "\\n\\nDraft exactly one short Instagram private reply to this follower's comment. Respond naturally to its content. No follow-up sequence, no forced product pitch, and no unnecessary link. Never claim the DM has been sent.",
-    "Comment from @" + item.username + ": " + item.text,
-    120
-  ).then(result => {
-    const current = pendingComments.get(followerId);
-    if (current) current.draft = result.output_text || current.draft;
-  }).catch(error => console.error("Could not draft comment reply:", error.message));
-  if (processedFollowerIds.size > 10000) processedFollowerIds.delete(processedFollowerIds.values().next().value);
+  pendingComments.set(id, item);
+  try {
+    const result = await callOllama(
+      loadAgentInstructions() + "\\n\\nWrite the single first private reply to this Instagram comment. Respond naturally to the comment. If the person clearly asks for the free guide, include https://40roadmap.netlify.app. Mention a product only when they clearly ask about it, and include the required affiliate disclosure. Do not begin a multi-message pitch. Keep it concise.",
+      "Comment from @" + item.username + ": " + item.text,
+      180
+    );
+    item.draft = result.output_text || item.draft;
+    if (AUTO_DMS_ENABLED) {
+      await sendInstagramMessage({ comment_id: id }, item.draft);
+      item.status = "sent";
+    }
+  } catch (error) {
+    item.status = AUTO_DMS_ENABLED ? "send_failed" : "draft_ready";
+    console.error("Comment private reply processing failed:", error.message);
+  }
+  pendingComments.set(id, item);
+  if (processedCommentIds.size > 10000) processedCommentIds.delete(processedCommentIds.values().next().value);
+}
+
+async function receiveInstagramMessage(event) {
+  const senderId = String(event?.sender?.id || "");
+  const messageId = String(event?.message?.mid || "");
+  const text = String(event?.message?.text || "").trim().slice(0, 2000);
+  const timestamp = Number(event?.timestamp || 0);
+  if (!AUTO_DMS_ENABLED || !senderId || !messageId || !text || event?.message?.is_echo || processedMessageIds.has(messageId)) return;
+  // Only answer a genuine inbound message, inside Meta's standard 24-hour window.
+  if (!timestamp || Date.now() - timestamp > 24 * 60 * 60 * 1000 || timestamp > Date.now() + 60000) return;
+  processedMessageIds.add(messageId);
+  const history = dmHistory.get(senderId) || [];
+  history.push({ role: "user", content: text });
+  const response = await callOllama(
+    loadAgentInstructions() + "\\n\\nYou are Kai's Instagram sales assistant. Continue the conversation naturally in DM, answer the person's actual question, ask at most one useful question, and offer relevant help without pressure. Share the free guide when asked. Share affiliate product links only when the person expresses clear interest and always include the affiliate disclosure. Do not make medical claims or invent product facts. Reply only to this inbound message.",
+    history,
+    250
+  );
+  const reply = String(response.output_text || "").trim();
+  if (!reply) return;
+  await sendInstagramMessage({ id: senderId }, reply);
+  history.push({ role: "assistant", content: reply });
+  dmHistory.set(senderId, history.slice(-12));
+  if (processedMessageIds.size > 10000) processedMessageIds.delete(processedMessageIds.values().next().value);
 }
 
 async function callOllama(instructions, input, maxTokens) {
@@ -138,8 +183,10 @@ app.get("/health", (_req, res) => res.json({
   ollamaConfigured: Boolean(process.env.OLLAMA_BASE_URL && process.env.OLLAMA_API_KEY),
   ollamaModel: process.env.OLLAMA_MODEL || "qwen2.5:1.5b",
   agentKnowledgeLoaded: true,
-  metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_ACCESS_TOKEN && process.env.INSTAGRAM_ACCOUNT_ID),
-  automatedRepliesEnabled: false
+  metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_APP_SECRET && process.env.META_ACCESS_TOKEN && process.env.INSTAGRAM_ACCOUNT_ID && process.env.META_GRAPH_API_VERSION),
+  automatedRepliesEnabled: AUTO_DMS_ENABLED,
+  commentRepliesPerComment: 1,
+  dmSalesConversationEnabled: AUTO_DMS_ENABLED
 }));
 
 app.post("/agent/draft", async (req, res, next) => {
@@ -264,16 +311,17 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", (req, res) => {
   if (!verifyMetaSignature(req)) return res.sendStatus(401);
-  try {
-    for (const entry of req.body?.entry || []) {
-      for (const change of entry?.changes || []) {
-        if (change?.field === "comments") receiveComment(change.value || {});
+  // Acknowledge quickly; process events asynchronously to avoid webhook retries.
+  res.sendStatus(200);
+  for (const entry of req.body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      if (change?.field === "comments") {
+        receiveComment(change.value || {}).catch(error => console.error("Comment event failed:", error.message));
       }
     }
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Meta webhook processing failed:", error);
-    res.sendStatus(200);
+    for (const event of entry?.messaging || []) {
+      receiveInstagramMessage(event).catch(error => console.error("DM event failed:", error.message));
+    }
   }
 });
 
