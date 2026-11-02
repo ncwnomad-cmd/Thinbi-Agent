@@ -55,7 +55,26 @@ const followerReservations = new Map();
 const inFlightFollowers = new Set();
 const inFlightMessages = new Set();
 let metaCredentials = null;
-const metaOAuthStates = new Map();
+function createMetaOAuthState() {
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(32).toString("hex");
+  const payload = timestamp + "." + nonce;
+  const signature = createHmac("sha256", process.env.META_BUSINESS_APP_SECRET).update(payload).digest("hex");
+  return payload + "." + signature;
+}
+
+function verifyMetaOAuthState(state) {
+  const parts = String(state || "").split(".");
+  if (parts.length !== 3) return false;
+  const [timestamp, nonce, signature] = parts;
+  if (!/^\d{13}$/.test(timestamp) || !/^[a-f0-9]{64}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) return false;
+  const age = Date.now() - Number(timestamp);
+  if (age < 0 || age > 10 * 60 * 1000) return false;
+  const payload = timestamp + "." + nonce;
+  const expected = createHmac("sha256", process.env.META_BUSINESS_APP_SECRET).update(payload).digest();
+  const actual = Buffer.from(signature, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
 const AUTO_DMS_ENABLED = process.env.INSTAGRAM_AUTO_DMS_ENABLED === "true";
 
 function metaCredentialKey() {
@@ -516,8 +535,8 @@ app.get("/auth/meta/start", (_req, res) => {
   if (!appId || !configId || !appSecret || !SUPABASE_SERVICE_ROLE_KEY) {
     return res.status(503).json({ error: "Meta Business OAuth is not configured. Set META_BUSINESS_APP_ID, META_BUSINESS_APP_SECRET, META_BUSINESS_CONFIG_ID, and the Supabase service key first." });
   }
-  const state = randomBytes(32).toString("hex");
-  metaOAuthStates.set(state, Date.now());
+  // Signed, stateless OAuth state survives Render restarts and instance routing.
+  const state = createMetaOAuthState();
   const url = new URL("https://www.facebook.com/v26.0/dialog/oauth");
   url.searchParams.set("client_id", appId);
   url.searchParams.set("redirect_uri", redirectUri);
@@ -533,12 +552,9 @@ app.get("/auth/meta/callback", async (req, res) => {
     if (req.query.error) return res.status(400).send("Meta authorization was not completed. You can close this page and try again.");
     const code = String(req.query.code || "");
     const state = String(req.query.state || "");
-    const startedAt = metaOAuthStates.get(state);
-    if (!code || !state || !startedAt || Date.now() - startedAt > 10 * 60 * 1000) {
-      metaOAuthStates.delete(state);
+    if (!code || !verifyMetaOAuthState(state)) {
       return res.status(400).send("The Meta login state is invalid or expired. Start the connection again.");
     }
-    metaOAuthStates.delete(state);
     const appId = process.env.META_BUSINESS_APP_ID;
     const appSecret = process.env.META_BUSINESS_APP_SECRET;
     const redirectUri = process.env.META_BUSINESS_REDIRECT_URI || "https://thinbi-agent.onrender.com/auth/meta/callback";
