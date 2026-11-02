@@ -175,7 +175,8 @@ function isInstagramLoginToken() {
 }
 
 function getMetaAccessToken() {
-  return metaCredentials?.pageAccessToken || process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "";
+  // Instagram Login credentials must take precedence over any legacy Facebook Page token.
+  return process.env.INSTAGRAM_ACCESS_TOKEN || metaCredentials?.pageAccessToken || process.env.META_ACCESS_TOKEN || "";
 }
 
 function getInstagramAccountId() {
