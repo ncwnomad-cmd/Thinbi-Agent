@@ -569,23 +569,77 @@ app.get("/auth/meta/callback", async (req, res) => {
     const shortData = await shortResponse.json();
     if (!shortResponse.ok || !shortData.access_token) throw new Error("Meta authorization-code exchange failed: " + JSON.stringify(shortData).slice(0, 300));
 
-    const longUrl = new URL("https://graph.facebook.com/" + version + "/oauth/access_token");
-    longUrl.searchParams.set("grant_type", "fb_exchange_token");
-    longUrl.searchParams.set("client_id", appId);
-    longUrl.searchParams.set("client_secret", appSecret);
-    longUrl.searchParams.set("fb_exchange_token", shortData.access_token);
-    const longResponse = await fetch(longUrl, { signal: AbortSignal.timeout(20000) });
-    const longData = await longResponse.json();
-    if (!longResponse.ok || !longData.access_token) throw new Error("Long-lived Meta token exchange failed: " + JSON.stringify(longData).slice(0, 300));
+    // Facebook Login for Business configurations using a System-user access token
+    // return a business-scoped token. Do NOT exchange it with fb_exchange_token:
+    // that exchange is for short-lived Facebook User tokens, not system-user tokens.
+    const businessAccessToken = shortData.access_token;
 
+    // Inspect token metadata without ever logging or returning the token itself.
+    const debugUrl = new URL("https://graph.facebook.com/" + version + "/debug_token");
+    debugUrl.searchParams.set("input_token", businessAccessToken);
+    debugUrl.searchParams.set("access_token", appId + "|" + appSecret);
+    let tokenInfo = null;
+    try {
+      const debugResponse = await fetch(debugUrl, { signal: AbortSignal.timeout(15000) });
+      const debugData = await debugResponse.json();
+      if (debugResponse.ok) {
+        tokenInfo = debugData.data || null;
+        console.log("Meta token inspected:", JSON.stringify({
+          type: tokenInfo?.type || null,
+          isValid: tokenInfo?.is_valid ?? null,
+          appIdMatches: String(tokenInfo?.app_id || "") === String(appId),
+          scopes: tokenInfo?.scopes || [],
+          granularScopes: (tokenInfo?.granular_scopes || []).map(item => ({
+            scope: item.scope,
+            targetIds: item.target_ids || []
+          }))
+        }));
+      } else {
+        console.warn("Meta token inspection unavailable:", JSON.stringify(debugData).slice(0, 250));
+      }
+    } catch (debugError) {
+      console.warn("Meta token inspection request failed:", String(debugError.message || debugError).slice(0, 200));
+    }
+
+    // For Login for Business system-user tokens, enumerate the Page assets granted
+    // during consent using the token directly. No user-token extension is performed.
     const pagesUrl = new URL("https://graph.facebook.com/" + version + "/me/accounts");
     pagesUrl.searchParams.set("fields", "id,name,access_token,instagram_business_account{id,username}");
-    pagesUrl.searchParams.set("access_token", longData.access_token);
+    pagesUrl.searchParams.set("access_token", businessAccessToken);
     const pagesResponse = await fetch(pagesUrl, { signal: AbortSignal.timeout(20000) });
     const pagesData = await pagesResponse.json();
     if (!pagesResponse.ok) throw new Error("Could not retrieve connected Pages: " + JSON.stringify(pagesData).slice(0, 300));
-    const connectedPage = (pagesData.data || []).find(page => page.instagram_business_account?.id && page.access_token);
-    if (!connectedPage) throw new Error("No Facebook Page with a linked Instagram professional account was returned. Confirm the Page and Instagram account are assigned to this business and try again.");
+
+    let pageList = Array.isArray(pagesData.data) ? pagesData.data : [];
+    // Some business-token grants expose selected assets on the /me node. Try that
+    // representation as a fallback, without changing or broadening granted access.
+    if (!pageList.length) {
+      const meUrl = new URL("https://graph.facebook.com/" + version + "/me");
+      meUrl.searchParams.set("fields", "id,name,accounts{id,name,access_token,instagram_business_account{id,username}}");
+      meUrl.searchParams.set("access_token", businessAccessToken);
+      const meResponse = await fetch(meUrl, { signal: AbortSignal.timeout(20000) });
+      const meData = await meResponse.json();
+      if (meResponse.ok && Array.isArray(meData.accounts?.data)) pageList = meData.accounts.data;
+      else console.warn("Meta /me asset fallback returned no Page assets:", JSON.stringify({
+        status: meResponse.status,
+        error: meData.error ? { code: meData.error.code, subcode: meData.error.error_subcode, message: meData.error.message } : null,
+        debugTokenType: tokenInfo?.type || null,
+        debugTokenValid: tokenInfo?.is_valid ?? null
+      }));
+    }
+
+    const connectedPage = pageList.find(page => page.instagram_business_account?.id && page.access_token);
+    if (!connectedPage) {
+      const grantedTargets = (tokenInfo?.granular_scopes || []).flatMap(item => item.target_ids || []);
+      console.warn("No linked Instagram Page found in the assets granted to this business token:", JSON.stringify({
+        pageCount: pageList.length,
+        debugTokenType: tokenInfo?.type || null,
+        debugTokenValid: tokenInfo?.is_valid ?? null,
+        scopes: tokenInfo?.scopes || [],
+        grantedTargetIds: [...new Set(grantedTargets)]
+      }));
+      throw new Error("Meta authorized successfully, but this business token did not return a Facebook Page with a linked Instagram professional account. Check the new 'Meta token inspected' and 'No linked Instagram Page' log entries for token type, granted permissions, and selected asset IDs.");
+    }
 
     metaCredentials = {
       pageId: connectedPage.id,
