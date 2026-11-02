@@ -185,8 +185,9 @@ function getInstagramAccountId() {
 
 function getInstagramGraphBase() {
   const version = process.env.META_GRAPH_API_VERSION || "v26.0";
-  const host = isInstagramLoginToken() ? "graph.instagram.com" : "graph.facebook.com";
-  return `https://${host}/${version}`;
+  // The generated token is a System User token with instagram_basic / instagram_manage_* scopes.
+  // Those are the Facebook Login permission family and must use graph.facebook.com.
+  return `https://graph.facebook.com/${version}`;
 }
 
 async function metaPost(path, body) {
@@ -427,13 +428,15 @@ app.get("/health", (_req, res) => res.json({
 app.get("/meta/verify", async (_req, res) => {
   try {
     if (!isInstagramLoginToken()) return res.status(409).json({ ok: false, error: "Set INSTAGRAM_ACCESS_TOKEN to verify Instagram Login credentials." });
-    const url = new URL(getInstagramGraphBase() + "/me");
-    url.searchParams.set("fields", "user_id,username");
+    const accountId = getInstagramAccountId();
+    if (!accountId) return res.status(409).json({ ok: false, error: "Set INSTAGRAM_ACCOUNT_ID to verify the Instagram account asset." });
+    const url = new URL(getInstagramGraphBase() + "/" + accountId);
+    url.searchParams.set("fields", "id,username");
     url.searchParams.set("access_token", getMetaAccessToken());
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     const data = await response.json();
     if (!response.ok) return res.status(502).json({ ok: false, error: data.error?.message || "Instagram token verification failed." });
-    res.json({ ok: true, instagramAccountConnected: true, instagramAccountId: String(data.user_id || ""), username: data.username || "" });
+    res.json({ ok: true, instagramAccountConnected: true, instagramAccountId: String(data.id || ""), username: data.username || "" });
   } catch (error) {
     res.status(502).json({ ok: false, error: error.message || "Instagram token verification failed." });
   }
