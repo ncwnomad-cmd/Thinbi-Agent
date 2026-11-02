@@ -170,19 +170,29 @@ function verifyMetaSignature(req) {
   return actual.length === expected.length && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
+function isInstagramLoginToken() {
+  return Boolean(process.env.INSTAGRAM_ACCESS_TOKEN);
+}
+
 function getMetaAccessToken() {
-  return metaCredentials?.pageAccessToken || process.env.META_ACCESS_TOKEN || "";
+  return metaCredentials?.pageAccessToken || process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "";
 }
 
 function getInstagramAccountId() {
   return metaCredentials?.instagramAccountId || process.env.INSTAGRAM_ACCOUNT_ID || "";
 }
 
+function getInstagramGraphBase() {
+  const version = process.env.META_GRAPH_API_VERSION || "v26.0";
+  const host = isInstagramLoginToken() ? "graph.instagram.com" : "graph.facebook.com";
+  return `https://${host}/${version}`;
+}
+
 async function metaPost(path, body) {
   const token = getMetaAccessToken();
-  const version = process.env.META_GRAPH_API_VERSION;
-  if (!token || !version) throw new Error("Instagram messaging credentials are not fully configured.");
-  const response = await fetch(`https://graph.facebook.com/${version}/${path}`, {
+  if (!token) throw new Error("Instagram access token is not configured.");
+  const url = new URL(getInstagramGraphBase() + "/" + path);
+  const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...body, access_token: token }),
@@ -404,7 +414,7 @@ app.get("/health", (_req, res) => res.json({
   agentKnowledgeLoaded: true,
   metaWebhookConfigured: Boolean(process.env.META_VERIFY_TOKEN && process.env.META_APP_SECRET && getMetaAccessToken() && getInstagramAccountId() && process.env.META_GRAPH_API_VERSION),
   metaOAuthConfigured: Boolean(process.env.META_BUSINESS_APP_ID && process.env.META_BUSINESS_APP_SECRET && SUPABASE_SERVICE_ROLE_KEY),
-  instagramAccountConnected: Boolean(metaCredentials?.instagramAccountId),
+  instagramAccountConnected: Boolean(getInstagramAccountId() && getMetaAccessToken()),
   automatedRepliesEnabled: AUTO_DMS_ENABLED,
   commentRepliesPerComment: 1,
   dmSalesConversationEnabled: AUTO_DMS_ENABLED,
@@ -412,6 +422,21 @@ app.get("/health", (_req, res) => res.json({
   supabaseConfigured: USE_SUPABASE_STATE,
   dataDirConfigured: Boolean(process.env.DATA_DIR)
 }));
+
+app.get("/meta/verify", async (_req, res) => {
+  try {
+    if (!isInstagramLoginToken()) return res.status(409).json({ ok: false, error: "Set INSTAGRAM_ACCESS_TOKEN to verify Instagram Login credentials." });
+    const url = new URL(getInstagramGraphBase() + "/me");
+    url.searchParams.set("fields", "user_id,username");
+    url.searchParams.set("access_token", getMetaAccessToken());
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const data = await response.json();
+    if (!response.ok) return res.status(502).json({ ok: false, error: data.error?.message || "Instagram token verification failed." });
+    res.json({ ok: true, instagramAccountConnected: true, instagramAccountId: String(data.user_id || ""), username: data.username || "" });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error.message || "Instagram token verification failed." });
+  }
+});
 
 app.post("/agent/draft", async (req, res, next) => {
   try {
