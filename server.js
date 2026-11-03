@@ -6,9 +6,13 @@ import { dirname, join } from "node:path";
 import { createHmac, timingSafeEqual, createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import OpenAI from "openai";
 import { Composio } from "@composio/core";
+import { registerColoringBookRoutes } from "./coloring-book.js";
+import { registerColoringBookAssemblyRoute } from "./coloring-book-assembly.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
+registerColoringBookRoutes(app);
+registerColoringBookAssemblyRoute(app);
 
 const PORT = Number(process.env.PORT || 3000);
 const USER_ID = process.env.COMPOSIO_USER_ID || "thinbi-instagram-owner";

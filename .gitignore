@@ -3,3 +3,11 @@
 !.env.example
 node_modules/
 .DS_Store
+
+# Local coloring-book generation outputs and Python cache
+__pycache__/
+*.py[cod]
+Pages/
+PrintReady/
+generation_progress.json
+quality_report.json
